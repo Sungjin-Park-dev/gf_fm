@@ -20,9 +20,10 @@ class SecondOrderFlowDataset(Dataset):
     HDF5 Structure (from generate_2nd_order_dataset.py):
         /data/demo_0/obs/joint_pos: (T, 7)
         /data/demo_0/obs/joint_vel: (T, 7)
-        /data/demo_0/obs/eef_pos: (T, 3)
-        /data/demo_0/obs/eef_quat: (T, 4)
-        /data/demo_0/obs/obstacle_pos: (T, K*3)
+        /data/demo_0/obs/goal_q: (T, 7)        # For goal-conditioned training
+        /data/demo_0/obs/eef_pos: (T, 3)       # Optional
+        /data/demo_0/obs/eef_quat: (T, 4)      # Optional
+        /data/demo_0/obs/obstacle_pos: (T, K*3) # Optional
         /data/demo_0/actions: (T, 14)  # [q_dot, q_ddot]
 
     Returns:
@@ -261,7 +262,7 @@ def get_shape_meta_from_dataset(
 
         # Observation shapes
         if obs_keys is None:
-            obs_keys = ['joint_pos', 'joint_vel', 'eef_pos', 'eef_quat', 'obstacle_pos']
+            obs_keys = ['joint_pos', 'joint_vel', 'goal_q', 'eef_pos', 'eef_quat', 'obstacle_pos']
 
         for obs_key in obs_keys:
             if f'obs/{obs_key}' in demo_group:

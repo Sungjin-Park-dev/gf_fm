@@ -29,6 +29,9 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda:0", help="CUDA device")
     parser.add_argument("--interpolation_dt", type=float, default=0.02, help="Trajectory interpolation dt")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    # Goal-conditioned options
+    parser.add_argument("--fixed_start", action="store_true", help="Use fixed start joint configuration")
+    parser.add_argument("--goal_conditioned", action="store_true", help="Store goal_q for goal-conditioned training")
     return parser.parse_args()
 
 
@@ -42,6 +45,9 @@ FRANKA_JOINT_NAMES = [
     "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4",
     "panda_joint5", "panda_joint6", "panda_joint7"
 ]
+
+# Fixed start configuration (Franka home position)
+FIXED_START_Q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float32)
 
 
 def setup_curobo(device: str, interpolation_dt: float):
@@ -193,12 +199,13 @@ def compute_actions(positions: np.ndarray, velocities: np.ndarray, accelerations
     return actions.astype(np.float32)
 
 
-def save_dataset(demos: list, output_path: str):
+def save_dataset(demos: list, output_path: str, goal_conditioned: bool = False):
     """Save demonstrations to HDF5 file.
 
     Args:
         demos: List of demo dicts
         output_path: Output HDF5 path
+        goal_conditioned: Whether to save goal_q for goal-conditioned training
     """
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
 
@@ -207,6 +214,7 @@ def save_dataset(demos: list, output_path: str):
         f.attrs["num_demos"] = len(demos)
         f.attrs["format"] = "gf_fm_2nd_order_standalone"
         f.attrs["joint_names"] = FRANKA_JOINT_NAMES
+        f.attrs["goal_conditioned"] = goal_conditioned
 
         data_grp = f.create_group("data")
 
@@ -218,6 +226,10 @@ def save_dataset(demos: list, output_path: str):
             obs_grp.create_dataset("joint_pos", data=demo["joint_pos"], compression="gzip")
             obs_grp.create_dataset("joint_vel", data=demo["joint_vel"], compression="gzip")
 
+            # Goal observation (for goal-conditioned training)
+            if goal_conditioned and "goal_q" in demo:
+                obs_grp.create_dataset("goal_q", data=demo["goal_q"], compression="gzip")
+
             # Actions: [q_dot, q_ddot]
             demo_grp.create_dataset("actions", data=demo["actions"], compression="gzip")
 
@@ -225,7 +237,15 @@ def save_dataset(demos: list, output_path: str):
             demo_grp.attrs["num_samples"] = len(demo["actions"])
             demo_grp.attrs["dt"] = demo["dt"]
 
+            # Store start/goal as metadata
+            if "q_start" in demo:
+                demo_grp.attrs["q_start"] = demo["q_start"]
+            if "q_goal" in demo:
+                demo_grp.attrs["q_goal"] = demo["q_goal"]
+
     print(f"[Dataset] Saved {len(demos)} demos to {output_path}")
+    if goal_conditioned:
+        print(f"[Dataset] Goal-conditioned: YES (goal_q stored)")
 
 
 def main():
@@ -242,6 +262,10 @@ def main():
     print(f"  Output: {args.output}")
     print(f"  Device: {args.device}")
     print(f"  Interpolation dt: {args.interpolation_dt}")
+    print(f"  Fixed start: {args.fixed_start}")
+    print(f"  Goal-conditioned: {args.goal_conditioned}")
+    if args.fixed_start:
+        print(f"  Start config: {FIXED_START_Q.tolist()}")
     print(f"{'='*60}\n")
 
     # Initialize cuRobo
@@ -254,8 +278,13 @@ def main():
     pbar = tqdm(total=args.num_demos, desc="Collecting demos")
 
     while len(demos) < args.num_demos:
-        # Sample random start and goal
-        q_start = sample_random_joint_config(rng)
+        # Sample start (fixed or random)
+        if args.fixed_start:
+            q_start = FIXED_START_Q.copy()
+        else:
+            q_start = sample_random_joint_config(rng)
+
+        # Sample random goal
         q_goal = sample_random_joint_config(rng)
 
         # Plan trajectory
@@ -272,22 +301,31 @@ def main():
             result["accelerations"]
         )
 
+        T = len(result["positions"])
+
         # Store demo
         demo = {
             "joint_pos": result["positions"].astype(np.float32),
             "joint_vel": result["velocities"].astype(np.float32),
             "actions": actions,
             "dt": result["dt"],
+            "q_start": q_start,
+            "q_goal": q_goal,
         }
+
+        # Add goal_q observation (replicated for each timestep)
+        if args.goal_conditioned:
+            demo["goal_q"] = np.tile(q_goal, (T, 1)).astype(np.float32)
+
         demos.append(demo)
 
         pbar.update(1)
-        pbar.set_postfix({"failed": failed_count, "T": len(result["positions"])})
+        pbar.set_postfix({"failed": failed_count, "T": T})
 
     pbar.close()
 
     # Save dataset
-    save_dataset(demos, args.output)
+    save_dataset(demos, args.output, goal_conditioned=args.goal_conditioned)
 
     # Summary
     total_samples = sum(len(d["actions"]) for d in demos)
@@ -300,6 +338,8 @@ def main():
     print(f"  Failed attempts: {failed_count}")
     print(f"  Total samples: {total_samples}")
     print(f"  Average trajectory length: {avg_len:.1f}")
+    print(f"  Fixed start: {args.fixed_start}")
+    print(f"  Goal-conditioned: {args.goal_conditioned}")
     print(f"  Output: {args.output}")
     print(f"{'='*60}\n")
 

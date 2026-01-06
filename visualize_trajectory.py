@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument("--pybullet", action="store_true", help="Use PyBullet for 3D visualization")
     parser.add_argument("--save_plot", type=str, default=None, help="Save plot to file instead of showing")
     parser.add_argument("--save_video", type=str, default=None, help="Save PyBullet video to file")
-    parser.add_argument("--playback_speed", type=float, default=1.0, help="Playback speed for PyBullet")
+    parser.add_argument("--playback_speed", type=float, default=0.5, help="Playback speed for PyBullet")
     return parser.parse_args()
 
 
@@ -83,30 +83,72 @@ def load_from_hdf5(hdf5_path: str, demo_idx: int) -> dict:
 
 
 def load_from_npz(npz_path: str, traj_idx: int) -> dict:
-    """Load trajectory from NPZ file (from play_standalone.py)."""
-    data = np.load(npz_path)
+    """Load trajectory from NPZ file (from play_standalone.py).
 
-    trajectories = data["trajectories"]  # (num_traj, T, 7)
+    Supports two formats:
+    1. Single-shot mode: trajectories array (num_traj, T, 7)
+    2. Receding horizon mode: traj_0, traj_1, ... with variable lengths
+    """
+    data = np.load(npz_path, allow_pickle=True)
+
     print(f"[NPZ] {npz_path}")
-    print(f"  Total trajectories: {trajectories.shape[0]}")
-    print(f"  Trajectory length: {trajectories.shape[1]}")
 
-    if traj_idx >= trajectories.shape[0]:
-        raise ValueError(f"traj_idx {traj_idx} >= num_trajectories {trajectories.shape[0]}")
+    # Check format: receding horizon vs single-shot
+    if "num_trajectories" in data:
+        # Receding horizon format
+        num_traj = int(data["num_trajectories"])
+        print(f"  Format: RECEDING HORIZON")
+        print(f"  Total trajectories: {num_traj}")
 
-    joint_pos = trajectories[traj_idx]  # (T, 7)
+        if traj_idx >= num_traj:
+            raise ValueError(f"traj_idx {traj_idx} >= num_trajectories {num_traj}")
+
+        joint_pos = data[f"traj_{traj_idx}"]  # (T, 7) - variable length
+        q_goal = data[f"goal_{traj_idx}"]
+        reached = bool(data[f"reached_{traj_idx}"])
+        steps = int(data[f"steps_{traj_idx}"])
+
+        print(f"  Trajectory {traj_idx}: {joint_pos.shape[0]} steps")
+        print(f"  Goal reached: {reached}")
+        print(f"  Goal position: [{', '.join(f'{g:.2f}' for g in q_goal)}]")
+
+    elif "trajectories" in data:
+        # Single-shot format
+        trajectories = data["trajectories"]  # (num_traj, T, 7)
+        print(f"  Format: SINGLE-SHOT")
+        print(f"  Total trajectories: {trajectories.shape[0]}")
+        print(f"  Trajectory length: {trajectories.shape[1]}")
+
+        if traj_idx >= trajectories.shape[0]:
+            raise ValueError(f"traj_idx {traj_idx} >= num_trajectories {trajectories.shape[0]}")
+
+        joint_pos = trajectories[traj_idx]  # (T, 7)
+        q_goal = None
+        reached = None
+        steps = None
+
+    else:
+        raise ValueError(f"Unknown NPZ format. Keys: {list(data.keys())}")
 
     # Compute velocity and acceleration from positions
     dt = 0.02  # Default dt
     joint_vel = np.gradient(joint_pos, dt, axis=0)
     joint_acc = np.gradient(joint_vel, dt, axis=0)
 
-    return {
+    result = {
         "joint_pos": joint_pos,
         "joint_vel": joint_vel,
         "joint_acc": joint_acc,
         "dt": dt,
     }
+
+    # Add goal info if available (receding horizon)
+    if q_goal is not None:
+        result["q_goal"] = q_goal
+        result["reached_goal"] = reached
+        result["total_steps"] = steps
+
+    return result
 
 
 def plot_trajectory(data: dict, save_path: str = None):
@@ -172,7 +214,7 @@ def plot_trajectory(data: dict, save_path: str = None):
 
 
 def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str = None):
-    """Visualize trajectory in PyBullet."""
+    """Visualize trajectory in PyBullet with optional goal visualization."""
     try:
         import pybullet as p
         import pybullet_data
@@ -182,18 +224,19 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
 
     joint_pos = data["joint_pos"]
     dt = data["dt"]
+    q_goal = data.get("q_goal", None)  # Goal position (if available)
 
     # Connect to PyBullet
     if save_video:
-        physics_client = p.connect(p.GUI, options=f"--mp4={save_video}")
+        p.connect(p.GUI, options=f"--mp4={save_video}")
     else:
-        physics_client = p.connect(p.GUI)
+        p.connect(p.GUI)
 
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -9.81)
 
     # Load ground plane
-    plane_id = p.loadURDF("plane.urdf")
+    p.loadURDF("plane.urdf")
 
     # Try to find Franka URDF
     urdf_paths = [
@@ -217,7 +260,7 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
 
     print(f"[PyBullet] Loading URDF: {robot_urdf}")
 
-    # Load robot
+    # Load main robot (blue - current trajectory)
     robot_id = p.loadURDF(
         robot_urdf,
         basePosition=[0, 0, 0],
@@ -238,6 +281,34 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
 
     print(f"[PyBullet] Found {len(joint_indices)} revolute joints")
 
+    # Load goal robot (green transparent ghost) if goal is available
+    goal_robot_id = None
+    if q_goal is not None:
+        print(f"[PyBullet] Loading goal robot (green ghost)")
+
+        goal_robot_id = p.loadURDF(
+            robot_urdf,
+            basePosition=[0, 0, 0],
+            baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
+            useFixedBase=True,
+        )
+
+        # Set goal robot to goal position
+        for i, joint_idx in enumerate(joint_indices[:7]):
+            p.resetJointState(goal_robot_id, joint_idx, q_goal[i])
+
+        # Make goal robot transparent green
+        for i in range(p.getNumJoints(goal_robot_id)):
+            p.changeVisualShape(
+                goal_robot_id, i,
+                rgbaColor=[0.2, 0.8, 0.2, 0.4]  # Green, 40% opacity
+            )
+        # Base link
+        p.changeVisualShape(
+            goal_robot_id, -1,
+            rgbaColor=[0.2, 0.8, 0.2, 0.4]
+        )
+
     # Camera setup
     p.resetDebugVisualizerCamera(
         cameraDistance=1.5,
@@ -251,12 +322,26 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
 
     # Add trajectory info text
+    goal_info = ""
+    if q_goal is not None:
+        reached = data.get("reached_goal", False)
+        goal_info = f" | Goal: {'REACHED' if reached else 'NOT REACHED'}"
+
     text_id = p.addUserDebugText(
-        f"Trajectory: {joint_pos.shape[0]} steps, dt={dt:.3f}s",
+        f"Trajectory: {joint_pos.shape[0]} steps, dt={dt:.3f}s{goal_info}",
         [0, 0, 1.0],
         textColorRGB=[0, 0, 0],
         textSize=1.5
     )
+
+    # Add legend
+    if q_goal is not None:
+        p.addUserDebugText(
+            "Green = Goal | Blue = Current",
+            [0, 0, 1.1],
+            textColorRGB=[0.3, 0.3, 0.3],
+            textSize=1.0
+        )
 
     # Playback loop
     print(f"[PyBullet] Playing trajectory ({joint_pos.shape[0]} steps)...")

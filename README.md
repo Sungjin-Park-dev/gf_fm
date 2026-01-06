@@ -157,6 +157,7 @@ Generate 2nd-order trajectory dataset using cuRobo standalone:
 Train 2nd-order Flow Matching policy:
 
 # Train with wandb
+```bash
 ./isaaclab.sh -p scripts/gf_fm/train_2nd_order.py \
     --config scripts/gf_fm/config/franka_gf_fm.yaml \
     --data_path scripts/gf_fm/datasets/franka_2nd_order.hdf5 \
@@ -211,22 +212,34 @@ Run policy inference with Geometric Fabrics guidance:
 
 ```bash
 # With GF guidance
-python play_standalone.py \
-    --checkpoint ./logs/gf_fm/checkpoints/best_model.pth \
+./isaaclab.sh -p scripts/gf_fm/play_standalone.py \
+    --checkpoint scripts/gf_fm/logs/franka/checkpoints/best_model.pth \
     --num_rollouts 100 \
     --guidance_scale 1.0
 
 # Without guidance (baseline)
-python play_standalone.py \
-    --checkpoint ./logs/gf_fm/checkpoints/best_model.pth \
+./isaaclab.sh -p scripts/gf_fm/play_standalone.py \
+    --checkpoint scripts/gf_fm/logs/franka/checkpoints/best_model.pth \
     --num_rollouts 100 \
     --no_guidance
 
 # Save results
-python play_standalone.py \
-    --checkpoint ./logs/gf_fm/checkpoints/best_model.pth \
-    --save_results results.json \
-    --save_trajectories trajectories.npz
+./isaaclab.sh -p scripts/gf_fm/play_standalone.py \
+    --checkpoint scripts/gf_fm/logs/franka/checkpoints/best_model.pth \
+    --num_rollouts 10 \
+    --no_guidance \
+    --save_results scripts/gf_fm/results/franka/results.json \
+    --save_trajectories scripts/gf_fm/results/franka/trajectories.npz
+
+./isaaclab.sh -p scripts/gf_fm/play_standalone.py \
+    --checkpoint scripts/gf_fm/logs/franka/checkpoints/best_model.pth \
+    --receding_horizon \
+    --replan_steps 4 \
+    --goal_threshold 1.0 \
+    --max_steps 1000 \
+    --num_rollouts 10 \
+    --no_guidance \
+    --save_trajectories scripts/gf_fm/results/franka/trajectories_rh.npz
 ```
 
 **Arguments:**
@@ -247,12 +260,12 @@ python play_standalone.py \
 
 ```bash
 # Visualize dataset demo
-python visualize_trajectory.py \
+./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
     --dataset ./datasets/franka_2nd_order.hdf5 \
     --demo_idx 0
 
 # Save plot
-python visualize_trajectory.py \
+./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
     --dataset ./datasets/franka_2nd_order.hdf5 \
     --save_plot trajectory_plot.png
 ```
@@ -261,31 +274,32 @@ python visualize_trajectory.py \
 
 ```bash
 # Interactive 3D visualization
-python visualize_trajectory.py \
-    --dataset ./datasets/franka_2nd_order.hdf5 \
-    --demo_idx 0 \
-    --pybullet
+# ./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
+#     --dataset ./datasets/franka_2nd_order.hdf5 \
+#     --demo_idx 0 \
+#     --pybullet
 
-# Save video
-python visualize_trajectory.py \
-    --dataset ./datasets/franka_2nd_order.hdf5 \
-    --pybullet \
-    --save_video trajectory.mp4
+# # Save video
+# ./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
+#     --dataset ./datasets/franka_2nd_order.hdf5 \
+#     --pybullet \
+#     --save_video trajectory.mp4
 
-# Slow playback
-python visualize_trajectory.py \
-    --dataset ./datasets/franka_2nd_order.hdf5 \
-    --pybullet \
-    --playback_speed 0.5
+# # Slow playback
+# ./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
+#     --dataset ./datasets/franka_2nd_order.hdf5 \
+#     --pybullet \
+#     --playback_speed 0.5
+
 ```
 
 #### Inference Results
 
 ```bash
 # Visualize inference trajectories
-python visualize_trajectory.py \
-    --npz trajectories.npz \
-    --traj_idx 0 \
+./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
+    --npz scripts/gf_fm/results/franka/trajectories_rh.npz \
+    --traj_idx 5 \
     --pybullet
 ```
 
@@ -452,3 +466,32 @@ pip install pybullet
 Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
+
+Step 1: 데이터 생성
+
+./isaaclab.sh -p scripts/gf_fm/generate_2nd_order_standalone.py \
+      --num_demos 1000 \
+      --fixed_start \
+      --goal_conditioned \
+      --output scripts/gf_fm/datasets/franka_goal_cond.hdf5
+
+
+
+Step 2: 학습
+
+./isaaclab.sh -p scripts/gf_fm/train_2nd_order.py \
+    --config scripts/gf_fm/config/franka_gf_fm_goal.yaml \
+    --data_path scripts/gf_fm/datasets/franka_goal_cond.hdf5
+
+
+
+Step 3: 검증
+
+./isaaclab.sh -p scripts/gf_fm/play_standalone.py \
+    --checkpoint scripts/gf_fm/logs/goal_cond/checkpoints/best_model.pth \
+    --receding_horizon \
+    --fixed_start \
+    --no_guidance \
+    --num_rollouts 10 \
+    --save_trajectories scripts/gf_fm/results/trajectories_goal.npz
