@@ -268,6 +268,14 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
         useFixedBase=True,
     )
 
+    # Color main robot blue
+    for i in range(p.getNumJoints(robot_id)):
+        p.changeVisualShape(
+            robot_id, i,
+            rgbaColor=[0.0, 0.0, 1.0, 1.0]  # Blue
+        )
+    p.changeVisualShape(robot_id, -1, rgbaColor=[0.0, 0.0, 1.0, 1.0])
+
     # Get joint info
     num_joints = p.getNumJoints(robot_id)
     joint_indices = []
@@ -292,6 +300,10 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
             baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
             useFixedBase=True,
         )
+
+        # Disable collisions for goal robot (visual only)
+        for i in range(p.getNumJoints(goal_robot_id)):
+            p.setCollisionFilterGroupMask(goal_robot_id, i, 0, 0)
 
         # Set goal robot to goal position
         for i, joint_idx in enumerate(joint_indices[:7]):
@@ -356,6 +368,11 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
         # Set joint positions
         for i, joint_idx in enumerate(joint_indices[:7]):
             p.resetJointState(robot_id, joint_idx, q[i])
+
+        # Reset goal robot position every frame to prevent gravity sagging
+        if goal_robot_id is not None:
+             for i, joint_idx in enumerate(joint_indices[:7]):
+                p.resetJointState(goal_robot_id, joint_idx, q_goal[i])
 
         # Update step text
         p.addUserDebugText(

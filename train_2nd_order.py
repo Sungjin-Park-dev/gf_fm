@@ -397,6 +397,16 @@ def train(config: dict, args: argparse.Namespace):
             if use_wandb and wandb.run is not None:
                 wandb.run.summary['best_loss'] = best_loss
                 wandb.run.summary['best_epoch'] = epoch + 1
+                
+                # Log model as Artifact
+                artifact = wandb.Artifact(
+                    name=f"model-{wandb.run.id}", 
+                    type="model",
+                    description=f"Best model (Loss: {best_loss:.6f})",
+                    metadata=config
+                )
+                artifact.add_file(best_path)
+                wandb.log_artifact(artifact, aliases=["best", "latest"])
 
     # Done
     cprint(f"\n[6/6] Training complete!", "green")

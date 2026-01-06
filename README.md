@@ -495,3 +495,12 @@ Step 3: 검증
     --no_guidance \
     --num_rollouts 10 \
     --save_trajectories scripts/gf_fm/results/trajectories_goal.npz
+
+
+Step 4: 시각화
+
+./isaaclab.sh -p scripts/gf_fm/visualize_trajectory.py \
+    --npz scripts/gf_fm/results/trajectories_goal.npz \
+    --traj_idx 5 \
+    --pybullet
+    --playback_speed 0.2

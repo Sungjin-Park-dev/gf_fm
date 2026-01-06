@@ -1,3 +1,12 @@
-# datasets/
-# logs/
+# Ignore large artifacts
+datasets/
+logs/
+results/
+*.hdf5
+*.pth
+*.pt
+*.npz
+
+# Python cache
 **.pyc
+__pycache__/

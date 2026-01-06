@@ -120,11 +120,17 @@ class StateOnlyEncoder(nn.Module):
         if 'object' in obs_dict:
             obs_list.append(obs_dict['object'])
 
-        # Legacy observations for backward compatibility
+        # Robot state observations
         if 'joint_pos' in obs_dict:
             obs_list.append(obs_dict['joint_pos'])
         if 'joint_vel' in obs_dict:
             obs_list.append(obs_dict['joint_vel'])
+
+        # Goal conditioning (for goal-conditioned policies)
+        if 'goal_q' in obs_dict:
+            obs_list.append(obs_dict['goal_q'])
+
+        # Legacy observations for backward compatibility
         if 'cube_positions' in obs_dict:
             obs_list.append(obs_dict['cube_positions'])
         if 'cube_orientations' in obs_dict:
