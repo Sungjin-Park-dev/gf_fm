@@ -1,0 +1,317 @@
+"""
+Inference script with Geometric Fabrics safety guidance.
+
+Runs trained SecondOrderFlowPolicy with GF guidance for collision-free generation.
+
+Usage:
+    python play_with_gf.py \\
+        --checkpoint ./logs/gf_fm/checkpoints/best_model.pth \\
+        --task Isaac-Reach-Franka-v0 \\
+        --num_rollouts 10 \\
+        --guidance_scale 1.0
+"""
+
+"""Launch Isaac Sim Simulator first."""
+
+import argparse
+import os
+import sys
+import torch
+import numpy as np
+
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Run GF-FM policy with safety guidance")
+parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
+parser.add_argument("--task", type=str, default=None, help="Task name (auto-detect from checkpoint)")
+parser.add_argument("--num_rollouts", type=int, default=10, help="Number of rollouts")
+parser.add_argument("--max_steps", type=int, default=500, help="Max steps per rollout")
+parser.add_argument("--guidance_scale", type=float, default=1.0, help="GF guidance scale")
+parser.add_argument("--no_guidance", action="store_true", help="Disable GF guidance")
+parser.add_argument("--world_config", type=str, default=None, help="World obstacle config file")
+parser.add_argument("--render", action="store_true", help="Enable rendering")
+parser.add_argument("--save_results", type=str, default=None, help="Save results to file")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+"""Rest follows."""
+
+import gymnasium as gym
+from termcolor import cprint
+from tqdm import tqdm
+
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'flowpolicy_curobo'))
+
+from policy.second_order_flow_policy import SecondOrderFlowPolicy
+from guidance.gf_guidance_field import GFGuidanceField
+from model.normalizer import LinearNormalizer
+
+
+def load_checkpoint(checkpoint_path: str, device: str):
+    """Load trained model from checkpoint.
+
+    Returns:
+        policy: SecondOrderFlowPolicy instance
+        config: Model configuration dict
+        task: Task name
+    """
+    cprint(f"Loading checkpoint: {checkpoint_path}", "cyan")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Extract info
+    config = checkpoint['config']
+    shape_meta = checkpoint['shape_meta']
+    task = checkpoint.get('task', 'Isaac-Reach-Franka-v0')
+
+    cprint(f"  Task: {task}", "cyan")
+    cprint(f"  State dim: {shape_meta.get('state', {}).get('shape', 'N/A')}", "cyan")
+    cprint(f"  Action dim: {shape_meta['action']['shape']}", "cyan")
+
+    # Create policy
+    policy = SecondOrderFlowPolicy(**config)
+
+    # Load weights
+    policy.load_state_dict(checkpoint['policy_state_dict'])
+
+    # Load normalizer
+    normalizer = LinearNormalizer()
+    normalizer.load_state_dict(checkpoint['normalizer_state_dict'])
+    policy.set_normalizer(normalizer)
+
+    policy.to(device)
+    policy.eval()
+
+    return policy, config, task
+
+
+def create_environment(task: str, device: str):
+    """Create Isaac Lab environment."""
+    env_cfg = parse_env_cfg(task, device=device, num_envs=1)
+    env_cfg.observations.policy.concatenate_terms = False
+
+    env = gym.make(task, cfg=env_cfg).unwrapped
+    return env
+
+
+def prepare_observation(env, obs_dict: dict, n_obs_steps: int, device: str) -> dict:
+    """Prepare observation dict for policy.
+
+    Handles observation history and formatting.
+    """
+    # Get current observation
+    current_obs = {}
+    for key, value in obs_dict.items():
+        if isinstance(value, torch.Tensor):
+            current_obs[key] = value.to(device)
+        else:
+            current_obs[key] = torch.tensor(value, device=device)
+
+    # Stack for history (simple repeat for now)
+    policy_obs = {}
+    for key, value in current_obs.items():
+        if value.dim() == 1:
+            value = value.unsqueeze(0)  # Add batch dim
+        # Repeat for n_obs_steps
+        value = value.unsqueeze(1).repeat(1, n_obs_steps, 1)
+        policy_obs[key] = value
+
+    return {'obs': policy_obs}
+
+
+def run_rollout(
+    env,
+    policy,
+    guidance_field,
+    config: dict,
+    max_steps: int,
+    device: str,
+) -> dict:
+    """Run single rollout with policy.
+
+    Returns:
+        results: Dict with success, steps, collisions, etc.
+    """
+    obs_dict, _ = env.reset()
+    n_obs_steps = config.get('n_obs_steps', 2)
+    joint_dim = config.get('joint_dim', 7)
+
+    total_reward = 0.0
+    steps = 0
+    success = False
+    collision_count = 0
+
+    # Track trajectory
+    trajectory_q = []
+    trajectory_qdot = []
+
+    for step in range(max_steps):
+        # Prepare observation
+        policy_input = prepare_observation(env, obs_dict, n_obs_steps, device)
+
+        # Get action from policy (with GF guidance if enabled)
+        with torch.no_grad():
+            result = policy.predict_action(policy_input)
+
+        # Extract action
+        action = result['action']  # (1, n_action_steps, 14)
+
+        # Use first action's q_dot as velocity command
+        q_dot_action = action[0, 0, :joint_dim]  # (7,)
+
+        # Convert to position command if needed (depends on env action space)
+        # For velocity control: use q_dot directly
+        # For position control: integrate q_dot
+
+        # Get current joint position
+        robot = env.scene["robot"]
+        current_q = robot.data.joint_pos[0, :joint_dim]
+        current_qdot = robot.data.joint_vel[0, :joint_dim]
+
+        # Record trajectory
+        trajectory_q.append(current_q.cpu().numpy())
+        trajectory_qdot.append(current_qdot.cpu().numpy())
+
+        # Compute next position (simple integration)
+        dt = 0.02  # Assume 50Hz control
+        next_q = current_q + dt * q_dot_action
+
+        # Execute action
+        # Note: Actual action format depends on environment
+        action_dim = env.action_manager.total_action_dim
+        env_action = torch.zeros(1, action_dim, device=device)
+        env_action[0, :min(joint_dim, action_dim)] = next_q[:min(joint_dim, action_dim)]
+
+        obs_dict, reward, done, truncated, info = env.step(env_action)
+
+        total_reward += reward.item() if hasattr(reward, 'item') else reward
+        steps += 1
+
+        # Check collision (if guidance field tracks it)
+        if guidance_field is not None:
+            collision_status = guidance_field.get_collision_status()
+            if collision_status is not None and collision_status.any():
+                collision_count += 1
+
+        # Check success
+        if 'success' in info and info['success']:
+            success = True
+            break
+
+        if done or truncated:
+            break
+
+    return {
+        'success': success,
+        'steps': steps,
+        'total_reward': total_reward,
+        'collision_count': collision_count,
+        'trajectory_q': np.stack(trajectory_q) if trajectory_q else None,
+        'trajectory_qdot': np.stack(trajectory_qdot) if trajectory_qdot else None,
+    }
+
+
+def main():
+    device = args_cli.device if hasattr(args_cli, 'device') and args_cli.device else 'cuda:0'
+
+    # Load policy
+    policy, config, task = load_checkpoint(args_cli.checkpoint, device)
+
+    # Override task if specified
+    if args_cli.task is not None:
+        task = args_cli.task
+
+    # Create environment
+    cprint(f"\nCreating environment: {task}", "green")
+    env = create_environment(task, device)
+
+    # Create GF guidance field
+    guidance_field = None
+    if not args_cli.no_guidance:
+        cprint("\nInitializing GF guidance field", "green")
+        guidance_field = GFGuidanceField(
+            batch_size=1,
+            device=device,
+            joint_dim=config.get('joint_dim', 7),
+            guidance_scale=args_cli.guidance_scale,
+        )
+
+        # Set world if config provided
+        if args_cli.world_config is not None:
+            guidance_field.set_world(args_cli.world_config)
+            cprint(f"  World config: {args_cli.world_config}", "cyan")
+        else:
+            cprint("  No world config - using default obstacles", "yellow")
+
+        policy.set_guidance_field(guidance_field)
+        cprint(f"  Guidance scale: {args_cli.guidance_scale}", "cyan")
+    else:
+        cprint("\nGF guidance DISABLED", "yellow")
+
+    # Run rollouts
+    cprint(f"\nRunning {args_cli.num_rollouts} rollouts...", "green")
+
+    results = []
+    success_count = 0
+    total_steps = 0
+    total_collisions = 0
+
+    for i in tqdm(range(args_cli.num_rollouts), desc="Rollouts"):
+        result = run_rollout(
+            env=env,
+            policy=policy,
+            guidance_field=guidance_field,
+            config=config,
+            max_steps=args_cli.max_steps,
+            device=device,
+        )
+        results.append(result)
+
+        if result['success']:
+            success_count += 1
+        total_steps += result['steps']
+        total_collisions += result['collision_count']
+
+    # Summary
+    cprint(f"\n{'='*60}", "cyan")
+    cprint("Results Summary", "cyan")
+    cprint(f"{'='*60}", "cyan")
+    cprint(f"  Success rate: {success_count}/{args_cli.num_rollouts} ({100*success_count/args_cli.num_rollouts:.1f}%)", "green")
+    cprint(f"  Average steps: {total_steps/args_cli.num_rollouts:.1f}", "cyan")
+    cprint(f"  Total collisions: {total_collisions}", "yellow" if total_collisions > 0 else "green")
+    cprint(f"  GF guidance: {'ENABLED' if not args_cli.no_guidance else 'DISABLED'}", "cyan")
+
+    # Save results
+    if args_cli.save_results is not None:
+        import json
+        summary = {
+            'num_rollouts': args_cli.num_rollouts,
+            'success_count': success_count,
+            'success_rate': success_count / args_cli.num_rollouts,
+            'average_steps': total_steps / args_cli.num_rollouts,
+            'total_collisions': total_collisions,
+            'guidance_enabled': not args_cli.no_guidance,
+            'guidance_scale': args_cli.guidance_scale,
+            'checkpoint': args_cli.checkpoint,
+            'task': task,
+        }
+        with open(args_cli.save_results, 'w') as f:
+            json.dump(summary, f, indent=2)
+        cprint(f"\nResults saved to: {args_cli.save_results}", "green")
+
+    env.close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        cprint("\nInterrupted by user", "yellow")
+    simulation_app.close()

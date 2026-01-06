@@ -1,0 +1,83 @@
+# GF-FM: 2nd-order Flow Matching with Geometric Fabrics Guidance
+# Configuration for Franka Panda robot
+
+# Task and data
+task: "Isaac-Reach-Franka-v0"
+data_path: "./datasets/franka_2nd_order.hdf5"
+
+# Observation keys for conditioning (beyond joint_pos, joint_vel which are automatic)
+obs_keys:
+  - eef_pos
+  - eef_quat
+  - obstacle_pos
+
+# Model architecture
+model:
+  # 2nd-order state dimensions
+  joint_dim: 7              # Franka arm joints
+  state_dim: 14             # [q, q_dot]
+  action_dim: 14            # [q_dot, q_ddot] velocity field
+
+  # Trajectory dimensions
+  horizon: 16               # Trajectory length
+  n_obs_steps: 2            # Observation history
+  n_action_steps: 8         # Actions to execute
+
+  # Encoder
+  encoder_output_dim: 256   # State encoder output dim
+
+  # UNet architecture
+  diffusion_step_embed_dim: 256
+  down_dims: [256, 512, 1024]
+  kernel_size: 5
+  n_groups: 8
+
+  # Conditioning
+  condition_type: "film"    # film, add, cross_attention
+  use_down_condition: true
+  use_mid_condition: true
+  use_up_condition: true
+  obs_as_global_cond: true
+
+# Consistency Flow Matching hyperparameters
+cfm:
+  eps: 0.01                 # Minimum time
+  num_segments: 2           # Time segments
+  boundary: 1               # Velocity threshold
+  delta: 0.01               # Consistency interval
+  alpha: 0.00001            # Velocity loss weight
+  num_inference_step: 10    # ODE integration steps (more for 2nd-order)
+  eta: 0.01
+
+# Normalization
+normalization:
+  mode: "limits"            # limits or gaussian
+  output_max: 1.0
+  output_min: -1.0
+
+# Training
+training:
+  num_epochs: 2000
+  batch_size: 2048
+  lr: 0.0001
+  weight_decay: 0.0001
+  num_workers: 4
+  seed: 42
+
+  # Logging
+  log_dir: "./logs/gf_fm"
+  checkpoint_dir: "./logs/gf_fm/checkpoints"
+  log_freq: 100
+  save_freq: 100
+
+  # Device
+  device: "cuda"
+
+# GF Guidance (for inference)
+gf_guidance:
+  enabled: true
+  guidance_scale: 1.0
+  max_strength: 5.0
+  timestep: 0.01
+  use_joint_limits: true
+  use_body_repulsion: true

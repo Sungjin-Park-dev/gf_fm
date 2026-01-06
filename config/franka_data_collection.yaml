@@ -1,0 +1,32 @@
+# Configuration for 2nd-order dataset collection using cuRobo
+# For generate_2nd_order_dataset.py
+
+# Task
+task: "Isaac-Reach-Franka-v0"
+
+# Output
+dataset_file: "./datasets/franka_2nd_order.hdf5"
+
+# Collection parameters
+num_demos: 100              # Number of successful demonstrations
+num_envs: 4                 # Parallel environments
+num_success_steps: 10       # Consecutive success steps to conclude demo
+
+# Trajectory parameters
+dt: 0.01                    # Control timestep for cuRobo planning
+
+# cuRobo planner settings
+planner:
+  enable_retiming: true
+  step_size: 0.01
+
+# Observations to record
+obs_keys:
+  - joint_pos               # (7,) Franka arm positions
+  - joint_vel               # (7,) Franka arm velocities
+  - eef_pos                 # (3,) End-effector position
+  - eef_quat                # (4,) End-effector quaternion
+  - obstacle_pos            # (K*3,) Obstacle positions
+
+# Device
+device: "cuda:0"
