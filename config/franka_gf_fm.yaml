@@ -65,8 +65,8 @@ training:
   seed: 42
 
   # Logging
-  log_dir: "./logs/gf_fm"
-  checkpoint_dir: "./logs/gf_fm/checkpoints"
+  log_dir: "./scripts/gf_fm/logs/franka"
+  checkpoint_dir: "./scripts/gf_fm/logs/franka/checkpoints"
   log_freq: 100
   save_freq: 100
 

@@ -122,9 +122,9 @@ python -c "from fabrics_sim.fabrics.franka_panda_cspace_fabric import FrankaPand
 Generate 2nd-order trajectory dataset using cuRobo standalone:
 
 ```bash
-python generate_2nd_order_standalone.py \
+./isaaclab.sh -p scripts/gf_fm/train_2nd_order.py \
     --num_demos 1000 \
-    --output ./datasets/franka_2nd_order.hdf5 \
+    --output scripts/gf_fm/datasets/franka_2nd_order.hdf5 \
     --device cuda:0 \
     --interpolation_dt 0.02 \
     --seed 42
@@ -156,25 +156,10 @@ python generate_2nd_order_standalone.py \
 
 Train 2nd-order Flow Matching policy:
 
-```bash
-./isaaclab.sh -p scripts/imitation_learning/gf_fm/train_2nd_order.py \
-    --config scripts/imitation_learning/gf_fm/config/franka_gf_fm.yaml \
-    --data_path ./datasets/franka_2nd_order.hdf5 \
-    --log_dir ./logs/gf_fm \
-    --device cuda:0
-```
-
-**With Weights & Biases (wandb) logging:**
-
-```bash
-# Install wandb first
-pip install wandb
-wandb login
-
 # Train with wandb
-./isaaclab.sh -p scripts/imitation_learning/gf_fm/train_2nd_order.py \
-    --config scripts/imitation_learning/gf_fm/config/franka_gf_fm.yaml \
-    --data_path ./datasets/franka_2nd_order.hdf5 \
+./isaaclab.sh -p scripts/gf_fm/train_2nd_order.py \
+    --config scripts/gf_fm/config/franka_gf_fm.yaml \
+    --data_path scripts/gf_fm/datasets/franka_2nd_order.hdf5 \
     --wandb \
     --wandb_project gf-fm
 ```

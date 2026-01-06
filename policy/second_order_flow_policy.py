@@ -14,20 +14,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from termcolor import cprint
-import sys
-import os
-
-# Add parent paths for imports
-_imitation_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-_flowpolicy_root = os.path.join(_imitation_root, 'flowpolicy_curobo')
-if _imitation_root not in sys.path:
-    sys.path.insert(0, _imitation_root)
-if _flowpolicy_root not in sys.path:
-    sys.path.insert(0, _flowpolicy_root)
 
 from common.sde_lib import ConsistencyFM
 from model.normalizer import LinearNormalizer
-from flowpolicy_curobo.policy.base_policy import BasePolicy
+from policy.base_policy import BasePolicy
 from model.conditional_unet1d import ConditionalUnet1D
 from model.mask_generator import LowdimMaskGenerator
 from common.pytorch_util import dict_apply
