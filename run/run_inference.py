@@ -18,13 +18,14 @@ import argparse
 import os
 import sys
 import json
+import yaml
 import numpy as np
 import torch
 from tqdm import tqdm
 
 # Add paths
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'flowpolicy_curobo'))
+# Add parent directory (gf_fm) to path to allow importing modules like policy, guidance, etc.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 
 def parse_args():
@@ -34,6 +35,21 @@ def parse_args():
     parser.add_argument("--horizon", type=int, default=16, help="Trajectory horizon")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="GF guidance scale")
     parser.add_argument("--no_guidance", action="store_true", help="Disable GF guidance")
+    parser.add_argument("--guidance_debug", action="store_true", help="Enable GF guidance debug logging")
+    parser.add_argument("--guidance_debug_every", type=int, default=50, help="Guidance debug print interval")
+    # Guidance integration mode options
+    parser.add_argument("--guidance_mode", type=str, default="additive",
+        choices=["additive", "ode_coupled"],
+        help="Guidance integration mode: additive (original) or ode_coupled (sub-step integration)")
+    parser.add_argument("--n_substeps", type=int, default=4,
+        help="Number of sub-steps for ODE-coupled guidance mode")
+    parser.add_argument("--lambda_schedule", type=str, default="constant",
+        choices=["constant", "linear_decay", "linear_increase", "cosine"],
+        help="Lambda schedule for guidance strength over flow time")
+    parser.add_argument("--obstacles", type=str, default=None,
+        help='Sphere obstacles as JSON: \'[{"pos":[x,y,z],"radius":r},...]\'')
+    parser.add_argument("--obstacles_file", type=str, default=None,
+        help='Path to YAML file containing obstacle definitions')
     parser.add_argument("--device", type=str, default="cuda:0", help="Device")
     parser.add_argument("--save_results", type=str, default=None, help="Save results to JSON")
     parser.add_argument("--save_trajectories", type=str, default=None, help="Save trajectories to NPZ")
@@ -42,8 +58,9 @@ def parse_args():
     parser.add_argument("--receding_horizon", action="store_true", help="Enable receding horizon mode")
     parser.add_argument("--replan_steps", type=int, default=4, help="Steps to execute before replanning")
     parser.add_argument("--goal_threshold", type=float, default=0.05, help="Goal position threshold (rad)")
-    parser.add_argument("--max_steps", type=int, default=1000, help="Maximum steps before timeout")
+    parser.add_argument("--max_steps", type=int, default=500, help="Maximum steps before timeout")
     parser.add_argument("--fixed_start", action="store_true", help="Use fixed start configuration")
+    parser.add_argument("--force_goal", type=str, default=None, help="Force specific goal joint config (list of 7 floats)")
     return parser.parse_args()
 
 
@@ -116,17 +133,22 @@ def sample_random_state(rng: np.random.Generator, device: str, margin: float = 0
     return q, q_dot
 
 
-def sample_goal_state(rng: np.random.Generator, device: str, margin: float = 0.1):
+def sample_goal_state(rng: np.random.Generator, device: str, margin: float = 0.1, forced_goal: list = None):
     """Sample random goal joint position within joint limits.
 
     Args:
         rng: Random number generator
         device: Device
         margin: Margin from joint limits (fraction of range)
+        forced_goal: Optional list of 7 floats to force goal
 
     Returns:
         q_goal: (1, 7) goal joint positions
     """
+    if forced_goal is not None:
+        q_goal = torch.tensor(forced_goal, device=device, dtype=torch.float32).unsqueeze(0)
+        return q_goal
+
     lower = FRANKA_JOINT_LIMITS["lower"]
     upper = FRANKA_JOINT_LIMITS["upper"]
 
@@ -353,7 +375,10 @@ def main():
     print(f"{'='*60}")
     print(f"  Checkpoint: {args.checkpoint}")
     print(f"  Rollouts: {args.num_rollouts}")
-    print(f"  Guidance: {'DISABLED' if args.no_guidance else f'scale={args.guidance_scale}'}")
+    if args.no_guidance:
+        print(f"  Guidance: DISABLED")
+    else:
+        print(f"  Guidance: scale={args.guidance_scale}, mode={args.guidance_mode}")
     print(f"  Device: {args.device}")
     if args.receding_horizon:
         print(f"  Mode: RECEDING HORIZON")
@@ -370,6 +395,19 @@ def main():
     # Load policy
     policy, config = load_checkpoint(args.checkpoint, args.device)
 
+    # Parse forced goal if provided
+    forced_goal = None
+    if args.force_goal:
+        try:
+            forced_goal = json.loads(args.force_goal)
+            if len(forced_goal) != 7:
+                 print(f"[WARNING] Forced goal must have 7 elements, got {len(forced_goal)}. Ignoring.")
+                 forced_goal = None
+            else:
+                 print(f"  Forced goal: {forced_goal}")
+        except json.JSONDecodeError as e:
+            print(f"[WARNING] Failed to parse force_goal: {e}. Ignoring.")
+
     # Create guidance field
     guidance_field = None
     if not args.no_guidance:
@@ -380,9 +418,48 @@ def main():
             device=args.device,
             joint_dim=config.get('joint_dim', 7),
             guidance_scale=args.guidance_scale,
+            debug=args.guidance_debug,
+            debug_every=args.guidance_debug_every,
         )
+
+        # Set sphere obstacles if provided (YAML file or JSON string)
+        obstacle_list = []
+        if args.obstacles_file:
+            try:
+                with open(args.obstacles_file, 'r') as f:
+                    obstacles_config = yaml.safe_load(f)
+                spheres = obstacles_config.get('obstacles', obstacles_config.get('spheres', []))
+                obstacle_list = [
+                    ((s['pos'][0], s['pos'][1], s['pos'][2]), s['radius'])
+                    for s in spheres
+                ]
+                print(f"[Obstacles] Loaded {len(obstacle_list)} obstacles from {args.obstacles_file}")
+            except Exception as e:
+                print(f"[WARNING] Failed to load obstacles file: {e}")
+        elif args.obstacles:
+            try:
+                spheres_json = json.loads(args.obstacles)
+                obstacle_list = [
+                    ((s['pos'][0], s['pos'][1], s['pos'][2]), s['radius'])
+                    for s in spheres_json
+                ]
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"[WARNING] Failed to parse obstacles: {e}")
+                print("[WARNING] Expected format: '[{\"pos\":[x,y,z],\"radius\":r},...]'")
+
+        if obstacle_list:
+            guidance_field.set_sphere_obstacles(obstacle_list)
+
         policy.set_guidance_field(guidance_field)
-        print("[Guidance] GF guidance enabled")
+
+        # Set guidance integration mode
+        policy.set_guidance_mode(
+            mode=args.guidance_mode,
+            n_substeps=args.n_substeps,
+            lambda_schedule=args.lambda_schedule,
+            lambda_base=args.guidance_scale,  # Use guidance_scale as lambda_base
+        )
+        print(f"[Guidance] GF guidance enabled (mode={args.guidance_mode}, substeps={args.n_substeps})")
     else:
         print("[Guidance] DISABLED")
 
@@ -407,7 +484,7 @@ def main():
 
         if args.receding_horizon:
             # Sample random goal state
-            q_goal = sample_goal_state(rng, args.device)
+            q_goal = sample_goal_state(rng, args.device, forced_goal=forced_goal)
 
             # Run receding horizon inference
             result = run_receding_horizon_inference(
@@ -477,6 +554,9 @@ def main():
             'total_violations': int(total_violations),
             'guidance_enabled': not args.no_guidance,
             'guidance_scale': args.guidance_scale,
+            'guidance_mode': args.guidance_mode,
+            'n_substeps': args.n_substeps,
+            'lambda_schedule': args.lambda_schedule,
             'checkpoint': args.checkpoint,
             'receding_horizon': args.receding_horizon,
         }

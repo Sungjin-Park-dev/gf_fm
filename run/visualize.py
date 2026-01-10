@@ -19,12 +19,15 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
+import yaml
 import numpy as np
 
 # Add paths
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add parent directory (gf_fm) to path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 
 def parse_args():
@@ -37,6 +40,10 @@ def parse_args():
     parser.add_argument("--save_plot", type=str, default=None, help="Save plot to file instead of showing")
     parser.add_argument("--save_video", type=str, default=None, help="Save PyBullet video to file")
     parser.add_argument("--playback_speed", type=float, default=0.5, help="Playback speed for PyBullet")
+    parser.add_argument("--obstacles", type=str, default=None,
+        help='Sphere obstacles as JSON: \'[{"pos":[x,y,z],"radius":r},...]\'')
+    parser.add_argument("--obstacles_file", type=str, default=None,
+        help='Path to YAML file containing obstacle definitions')
     return parser.parse_args()
 
 
@@ -213,8 +220,15 @@ def plot_trajectory(data: dict, save_path: str = None):
     plt.close()
 
 
-def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str = None):
-    """Visualize trajectory in PyBullet with optional goal visualization."""
+def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str = None, obstacles=None):
+    """Visualize trajectory in PyBullet with optional goal and obstacle visualization.
+
+    Args:
+        data: Trajectory data dict
+        playback_speed: Playback speed multiplier
+        save_video: Path to save video
+        obstacles: List of ((x, y, z), radius) tuples for sphere obstacles
+    """
     try:
         import pybullet as p
         import pybullet_data
@@ -321,12 +335,40 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
             rgbaColor=[0.2, 0.8, 0.2, 0.4]
         )
 
+    # Load sphere obstacles (red transparent)
+    obstacle_ids = []
+    if obstacles is not None and len(obstacles) > 0:
+        print(f"[PyBullet] Loading {len(obstacles)} sphere obstacle(s)")
+        for pos, radius in obstacles:
+            # Create visual shape (sphere)
+            sphere_visual = p.createVisualShape(
+                p.GEOM_SPHERE,
+                radius=radius,
+                rgbaColor=[1.0, 0.2, 0.2, 0.6]  # Red, 60% opacity
+            )
+            # Create collision shape (for visual reference, no physics)
+            sphere_collision = p.createCollisionShape(
+                p.GEOM_SPHERE,
+                radius=radius
+            )
+            # Create multi-body
+            sphere_body = p.createMultiBody(
+                baseMass=0,  # Static
+                baseCollisionShapeIndex=sphere_collision,
+                baseVisualShapeIndex=sphere_visual,
+                basePosition=list(pos)
+            )
+            # Disable collisions (visual only)
+            p.setCollisionFilterGroupMask(sphere_body, -1, 0, 0)
+            obstacle_ids.append(sphere_body)
+            print(f"    Sphere at ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}), r={radius:.2f}")
+
     # Camera setup
     p.resetDebugVisualizerCamera(
         cameraDistance=1.5,
-        cameraYaw=45,
-        cameraPitch=-30,
-        cameraTargetPosition=[0.3, 0, 0.4]
+        cameraYaw=90,
+        cameraPitch=-70,
+        cameraTargetPosition=[0.0, 0.0, 0.4]
     )
 
     # Disable rendering during setup
@@ -347,13 +389,17 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
     )
 
     # Add legend
+    legend_parts = ["Blue = Robot"]
     if q_goal is not None:
-        p.addUserDebugText(
-            "Green = Goal | Blue = Current",
-            [0, 0, 1.1],
-            textColorRGB=[0.3, 0.3, 0.3],
-            textSize=1.0
-        )
+        legend_parts.append("Green = Goal")
+    if obstacles is not None and len(obstacles) > 0:
+        legend_parts.append("Red = Obstacles")
+    p.addUserDebugText(
+        " | ".join(legend_parts),
+        [0, 0, 1.1],
+        textColorRGB=[0.3, 0.3, 0.3],
+        textSize=1.0
+    )
 
     # Playback loop
     print(f"[PyBullet] Playing trajectory ({joint_pos.shape[0]} steps)...")
@@ -362,38 +408,46 @@ def visualize_pybullet(data: dict, playback_speed: float = 1.0, save_video: str 
     import time
     step_time = dt / playback_speed
 
-    for t in range(joint_pos.shape[0]):
-        q = joint_pos[t]
+    try:
+        for t in range(joint_pos.shape[0]):
+            q = joint_pos[t]
 
-        # Set joint positions
-        for i, joint_idx in enumerate(joint_indices[:7]):
-            p.resetJointState(robot_id, joint_idx, q[i])
+            # Set joint positions
+            for i, joint_idx in enumerate(joint_indices[:7]):
+                p.resetJointState(robot_id, joint_idx, q[i])
 
-        # Reset goal robot position every frame to prevent gravity sagging
-        if goal_robot_id is not None:
-             for i, joint_idx in enumerate(joint_indices[:7]):
-                p.resetJointState(goal_robot_id, joint_idx, q_goal[i])
+            # Reset goal robot position every frame to prevent gravity sagging
+            if goal_robot_id is not None:
+                 for i, joint_idx in enumerate(joint_indices[:7]):
+                    p.resetJointState(goal_robot_id, joint_idx, q_goal[i])
 
-        # Update step text
-        p.addUserDebugText(
-            f"Step: {t+1}/{joint_pos.shape[0]}",
-            [0, 0, 0.9],
-            textColorRGB=[0, 0, 1],
-            textSize=1.2,
-            replaceItemUniqueId=text_id if t > 0 else -1
-        )
+            # Update step text
+            p.addUserDebugText(
+                f"Step: {t+1}/{joint_pos.shape[0]}",
+                [0, 0, 0.9],
+                textColorRGB=[0, 0, 1],
+                textSize=1.2,
+                replaceItemUniqueId=text_id if t > 0 else -1
+            )
 
-        p.stepSimulation()
-        time.sleep(step_time)
+            p.stepSimulation()
+            time.sleep(step_time)
 
-        # Check for quit
-        keys = p.getKeyboardEvents()
-        if ord('q') in keys:
-            break
+            # Check for quit
+            keys = p.getKeyboardEvents()
+            if ord('q') in keys:
+                break
+        
+        print("[PyBullet] Done.")
+        
+        if not save_video:
+            print("Press any key to close...")
+            input()
 
-    print("[PyBullet] Done. Press any key to close...")
-    input()
-    p.disconnect()
+    finally:
+        p.disconnect()
+        if save_video:
+            print(f"[PyBullet] Saved video to {save_video}")
 
 
 def main():
@@ -424,10 +478,35 @@ def main():
     print("\n[Plotting trajectory...]")
     plot_trajectory(data, args.save_plot)
 
+    # Parse obstacles if provided (YAML file or JSON string)
+    obstacle_list = None
+    if args.obstacles_file:
+        try:
+            with open(args.obstacles_file, 'r') as f:
+                obstacles_config = yaml.safe_load(f)
+            spheres = obstacles_config.get('obstacles', obstacles_config.get('spheres', []))
+            obstacle_list = [
+                ((s['pos'][0], s['pos'][1], s['pos'][2]), s['radius'])
+                for s in spheres
+            ]
+            print(f"\n[Obstacles] Loaded {len(obstacle_list)} sphere(s) from {args.obstacles_file}")
+        except Exception as e:
+            print(f"[WARNING] Failed to load obstacles file: {e}")
+    elif args.obstacles:
+        try:
+            spheres_json = json.loads(args.obstacles)
+            obstacle_list = [
+                ((s['pos'][0], s['pos'][1], s['pos'][2]), s['radius'])
+                for s in spheres_json
+            ]
+            print(f"\n[Obstacles] {len(obstacle_list)} sphere(s) defined")
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"[WARNING] Failed to parse obstacles: {e}")
+
     # PyBullet visualization
     if args.pybullet:
         print("\n[Starting PyBullet visualization...]")
-        visualize_pybullet(data, args.playback_speed, args.save_video)
+        visualize_pybullet(data, args.playback_speed, args.save_video, obstacle_list)
 
 
 if __name__ == "__main__":

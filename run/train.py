@@ -18,10 +18,11 @@ from termcolor import cprint
 import time
 from tqdm import tqdm
 
-# Add paths (keep local package resolution ahead of shared flowpolicy_curobo)
-gf_fm_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, gf_fm_dir)
-sys.path.append(os.path.join(gf_fm_dir, '..', 'flowpolicy_curobo'))
+# Add paths
+current_dir = os.path.dirname(os.path.abspath(__file__))
+gf_fm_root = os.path.join(current_dir, '..')
+sys.path.insert(0, gf_fm_root)
+sys.path.append(os.path.join(gf_fm_root, '..', 'flowpolicy_curobo'))
 
 from policy.second_order_flow_policy import SecondOrderFlowPolicy
 from data.second_order_dataset import SecondOrderFlowDataset, get_shape_meta_from_dataset
@@ -113,6 +114,8 @@ def save_checkpoint(
     save_path: str,
     training_stats: dict | None = None,
     task: str | None = None,
+    global_step: int = 0,
+    best_loss: float = float('inf'),
 ) -> None:
     """Save GF-FM checkpoint for training/inference."""
     checkpoint = {
@@ -122,6 +125,8 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "config": config,
         "shape_meta": shape_meta,
+        "global_step": global_step,
+        "best_loss": best_loss,
     }
     if task is not None:
         checkpoint["task"] = task
@@ -131,6 +136,56 @@ def save_checkpoint(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(checkpoint, save_path)
     print(f"[save_checkpoint] Checkpoint saved to: {save_path}")
+
+
+def load_checkpoint(
+    checkpoint_path: str,
+    policy: torch.nn.Module,
+    normalizer,
+    optimizer: torch.optim.Optimizer,
+    device: str = 'cuda',
+) -> dict:
+    """Load checkpoint and restore training state.
+
+    Args:
+        checkpoint_path: Path to checkpoint file
+        policy: Policy model to load weights into
+        normalizer: Normalizer to load state into
+        optimizer: Optimizer to load state into
+        device: Device to load checkpoint to
+
+    Returns:
+        dict with resume info: start_epoch, global_step, best_loss
+    """
+    cprint(f"[load_checkpoint] Loading checkpoint: {checkpoint_path}", "yellow")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Load model weights
+    policy.load_state_dict(checkpoint['policy_state_dict'])
+    cprint("  → Policy weights loaded", "cyan")
+
+    # Load normalizer state
+    normalizer.load_state_dict(checkpoint['normalizer_state_dict'])
+    cprint("  → Normalizer state loaded", "cyan")
+
+    # Load optimizer state
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    cprint("  → Optimizer state loaded", "cyan")
+
+    # Get training state
+    start_epoch = checkpoint.get('epoch', -1) + 1  # Resume from next epoch
+    global_step = checkpoint.get('global_step', 0)
+    best_loss = checkpoint.get('best_loss', float('inf'))
+
+    cprint(f"  → Resuming from epoch {start_epoch}, global_step {global_step}", "cyan")
+    cprint(f"  → Best loss so far: {best_loss:.6f}", "cyan")
+
+    return {
+        'start_epoch': start_epoch,
+        'global_step': global_step,
+        'best_loss': best_loss,
+    }
 
 
 def train(config: dict, args: argparse.Namespace):
@@ -276,6 +331,29 @@ def train(config: dict, args: argparse.Namespace):
         weight_decay=config['training'].get('weight_decay', 1e-4)
     )
 
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    global_step = 0
+    best_loss = float('inf')
+    best_epoch = -1
+
+    if args.resume is not None:
+        if os.path.isfile(args.resume):
+            resume_info = load_checkpoint(
+                checkpoint_path=args.resume,
+                policy=policy,
+                normalizer=normalizer,
+                optimizer=optimizer,
+                device=device,
+            )
+            start_epoch = resume_info['start_epoch']
+            global_step = resume_info['global_step']
+            best_loss = resume_info['best_loss']
+            best_epoch = start_epoch - 1
+        else:
+            cprint(f"[WARNING] Checkpoint not found: {args.resume}", "red")
+            cprint("  Starting training from scratch.", "yellow")
+
     # Print summary
     total_params = sum(p.numel() for p in policy.parameters())
     trainable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -284,16 +362,13 @@ def train(config: dict, args: argparse.Namespace):
 
     # Training loop
     cprint(f"\n[5/6] Starting training", "green")
-    cprint(f"  Epochs: {config['training']['num_epochs']}", "cyan")
+    cprint(f"  Epochs: {config['training']['num_epochs']} (starting from {start_epoch + 1})", "cyan")
     cprint(f"  Learning rate: {config['training']['lr']}", "cyan")
     cprint(f"  Device: {device}", "cyan")
 
     policy.train()
-    global_step = 0
-    best_loss = float('inf')
-    best_epoch = -1
 
-    for epoch in range(config['training']['num_epochs']):
+    for epoch in range(start_epoch, config['training']['num_epochs']):
         epoch_start_time = time.time()
         epoch_losses = []
         epoch_consistency_losses = []
@@ -372,7 +447,9 @@ def train(config: dict, args: argparse.Namespace):
                 shape_meta=shape_meta,
                 save_path=checkpoint_path,
                 training_stats={'epoch_loss': epoch_loss},
-                task=config['task']
+                task=config['task'],
+                global_step=global_step,
+                best_loss=best_loss,
             )
 
         # Save best
@@ -389,7 +466,9 @@ def train(config: dict, args: argparse.Namespace):
                 shape_meta=shape_meta,
                 save_path=best_path,
                 training_stats={'epoch_loss': epoch_loss, 'best_epoch': epoch},
-                task=config['task']
+                task=config['task'],
+                global_step=global_step,
+                best_loss=best_loss,
             )
             cprint(f"  → New best model! Loss: {best_loss:.6f} (Epoch {epoch+1})", "yellow")
 

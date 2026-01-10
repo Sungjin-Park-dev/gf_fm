@@ -23,6 +23,11 @@ from model.mask_generator import LowdimMaskGenerator
 from common.pytorch_util import dict_apply
 from common.model_util import print_params
 from model.state_encoder import StateOnlyEncoder
+from guidance.guidance_integrator import (
+    GuidanceMode,
+    GuidanceIntegrator,
+    create_guidance_integrator,
+)
 
 
 class SecondOrderFlowPolicy(BasePolicy):
@@ -65,6 +70,11 @@ class SecondOrderFlowPolicy(BasePolicy):
         encoder_output_dim: int = 256,
         Conditional_ConsistencyFM: Optional[dict] = None,
         eta: float = 0.01,
+        # Guidance integration mode options
+        guidance_mode: str = "additive",
+        n_guidance_substeps: int = 4,
+        lambda_schedule: str = "constant",
+        lambda_base: float = 1.0,
         **kwargs
     ):
         super().__init__()
@@ -183,6 +193,15 @@ class SecondOrderFlowPolicy(BasePolicy):
         # GF Guidance field (optional)
         self.guidance_field = None
 
+        # Guidance integration mode
+        self.guidance_mode = guidance_mode
+        self.n_guidance_substeps = n_guidance_substeps
+        self.lambda_schedule = lambda_schedule
+        self.lambda_base = lambda_base
+        self._guidance_integrator: Optional[GuidanceIntegrator] = None
+
+        cprint(f"[SecondOrderFlowPolicy] guidance_mode={guidance_mode}, n_substeps={n_guidance_substeps}", "cyan")
+
         print_params(self)
 
     def set_guidance_field(self, guidance_field) -> None:
@@ -198,6 +217,40 @@ class SecondOrderFlowPolicy(BasePolicy):
         """Enable GF guidance."""
         if self.guidance_field is not None:
             self.guidance_field.set_enabled(True)
+
+    def _get_guidance_integrator(self) -> Optional[GuidanceIntegrator]:
+        """Lazy initialization of guidance integrator."""
+        if self.guidance_field is None:
+            return None
+
+        if self._guidance_integrator is None:
+            self._guidance_integrator = create_guidance_integrator(
+                mode=self.guidance_mode,
+                n_substeps=self.n_guidance_substeps,
+                lambda_schedule=self.lambda_schedule,
+                lambda_base=self.lambda_base,
+            )
+            cprint(f"[SecondOrderFlowPolicy] Created {self.guidance_mode} integrator", "cyan")
+
+        return self._guidance_integrator
+
+    def set_guidance_mode(self, mode: str, **kwargs) -> None:
+        """Set guidance integration mode at runtime.
+
+        Args:
+            mode: "additive" or "ode_coupled"
+            **kwargs: Optional overrides for n_substeps, lambda_schedule, lambda_base
+        """
+        self.guidance_mode = mode
+        if 'n_substeps' in kwargs:
+            self.n_guidance_substeps = kwargs['n_substeps']
+        if 'lambda_schedule' in kwargs:
+            self.lambda_schedule = kwargs['lambda_schedule']
+        if 'lambda_base' in kwargs:
+            self.lambda_base = kwargs['lambda_base']
+        # Reset integrator for re-initialization with new settings
+        self._guidance_integrator = None
+        cprint(f"[SecondOrderFlowPolicy] Guidance mode set to: {mode}", "cyan")
 
     # ========= inference ============
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -281,6 +334,9 @@ class SecondOrderFlowPolicy(BasePolicy):
         dt = 1.0 / self.num_inference_step
         eps = self.eps
 
+        # Get guidance integrator (lazy initialization)
+        guidance_integrator = self._get_guidance_integrator()
+
         for i in range(sde.sample_N):
             num_t = i / sde.sample_N * (1 - eps) + eps
             t = torch.ones(z.shape[0], device=device) * num_t
@@ -288,29 +344,27 @@ class SecondOrderFlowPolicy(BasePolicy):
             # FM velocity prediction
             pred = self.model(z, t * 99, local_cond=local_cond, global_cond=global_cond)
 
-            # === GF GUIDANCE for 2nd-order states ===
-            if self.guidance_field is not None and self.guidance_field.enabled:
-                # Extract q and q_dot from current state estimate
-                # z has shape (B, T, 14) where first 7 are q_dot, next 7 are q_ddot
-                # But we need actual q, q_dot for GF computation
-
-                # For guidance, we need to maintain a running state estimate
-                # Approximate: use first observation's state + integrated velocity
-                # This is a simplification - in practice, might track state explicitly
-
-                guidance_velocity = self.guidance_field.compute_guidance(
-                    z[..., :Da],  # Current velocity field estimate
-                    t=num_t,
+            # === GUIDANCE INTEGRATION ===
+            if guidance_integrator is not None and self.guidance_field.enabled:
+                # Use integrator for guidance + ODE step
+                z = guidance_integrator.integrate_step(
+                    z=z,
+                    tau=num_t,
+                    dt=dt,
+                    fm_velocity=pred,
+                    guidance_field=self.guidance_field,
+                    obs_data=obs_data,
+                    sde=sde,
                     normalizer=self.normalizer,
+                    joint_dim=self.joint_dim,
+                    device=device,
                 )
-                pred[..., :Da] = pred[..., :Da] + guidance_velocity
-            # === END GF GUIDANCE ===
-
-            # SDE integration step
-            sigma_t = sde.sigma_t(num_t)
-            pred_sigma = pred + (sigma_t**2) / (2 * (sde.noise_scale**2) * ((1.0 - num_t)**2)) * \
-                        (0.5 * num_t * (1.0 - num_t) * pred - 0.5 * (2.0 - num_t) * z.detach().clone())
-            z = z.detach().clone() + pred_sigma * dt + sigma_t * np.sqrt(dt) * torch.randn_like(pred_sigma).to(device)
+            else:
+                # No guidance: standard Euler step
+                sigma_t = sde.sigma_t(num_t)
+                pred_sigma = pred + (sigma_t**2) / (2 * (sde.noise_scale**2) * ((1.0 - num_t)**2)) * \
+                            (0.5 * num_t * (1.0 - num_t) * pred - 0.5 * (2.0 - num_t) * z.detach().clone())
+                z = z.detach().clone() + pred_sigma * dt + sigma_t * np.sqrt(dt) * torch.randn_like(pred_sigma).to(device)
 
         z[cond_mask] = cond_data[cond_mask]
 

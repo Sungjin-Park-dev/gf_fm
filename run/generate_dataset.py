@@ -294,6 +294,23 @@ def main():
             failed_count += 1
             continue
 
+        # Add stationary padding at the goal to teach the model to stop
+        # This is critical for Flow Matching to learn v=0 at the goal
+        n_pad = 20  # Cover at least one horizon (16)
+        
+        # Get last position (should be close to q_goal, but use actual plan end)
+        last_pos = result["positions"][-1]
+        
+        # Create padding arrays
+        pad_pos = np.tile(last_pos, (n_pad, 1))
+        pad_vel = np.zeros((n_pad, 7), dtype=np.float32)
+        pad_acc = np.zeros((n_pad, 7), dtype=np.float32)
+        
+        # Append padding
+        result["positions"] = np.concatenate([result["positions"], pad_pos], axis=0)
+        result["velocities"] = np.concatenate([result["velocities"], pad_vel], axis=0)
+        result["accelerations"] = np.concatenate([result["accelerations"], pad_acc], axis=0)
+
         # Compute actions
         actions = compute_actions(
             result["positions"],
