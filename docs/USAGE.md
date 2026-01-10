@@ -51,42 +51,41 @@ Train the Flow Matching policy.
 
 Run inference with Geometric Fabrics guidance to avoid obstacles.
 
-### Basic Usage
+### No Guidance
 ```bash
 ./isaaclab.sh -p scripts/gf_fm/run/run_inference.py \
-    --checkpoint scripts/gf_fm/logs/goal_cond/checkpoints/best_model.pth \
+    --checkpoint scripts/gf_fm/logs/goal_cond_stop/checkpoints/best_model.pth \
+    --fixed_start \
     --num_rollouts 10 \
-    --guidance_scale 1.0
+    --no_guidance \
+    --obstacles_file scripts/gf_fm/config/obstacles_example.yaml \
+    --save_trajectories scripts/gf_fm/results/traj_baseline.npz
 ```
 
-### Obstacle Configuration
-You can define obstacles via a YAML file or JSON string.
-
-**YAML (`obstacles.yaml`):**
-```yaml
-obstacles:
-  - pos: [0.4, 0.0, 0.5]
-    radius: 0.15
-```
-
-**Command:**
+**Guidance (Post):**
 ```bash
 ./isaaclab.sh -p scripts/gf_fm/run/run_inference.py \
-    --checkpoint ... \
-    --obstacles_file obstacles.yaml \
-    --guidance_scale 2.0
+    --checkpoint scripts/gf_fm/logs/goal_cond_stop/checkpoints/best_model.pth \
+    --fixed_start \
+    --num_rollouts 10 \
+    --guidance_scal 1.0 \
+    --obstacles_file scripts/gf_fm/config/obstacles_example.yaml \
+    --save_trajectories scripts/gf_fm/results/traj_guidance.npz
 ```
 
 ### Advanced Guidance Modes
 Use **ODE-Coupled** mode for better stability and overshoot prevention.
-
 ```bash
 ./isaaclab.sh -p scripts/gf_fm/run/run_inference.py \
-    --checkpoint ... \
+    --checkpoint scripts/gf_fm/logs/goal_cond_stop/checkpoints/best_model.pth \
+    --fixed_start \
+    --num_rollouts 10 \
     --guidance_mode ode_coupled \
     --n_substeps 4 \
     --lambda_schedule constant \
-    --guidance_scale 1.0
+    --guidance_scale 1.0 \
+    --obstacles_file scripts/gf_fm/config/obstacles_example.yaml \
+    --save_trajectories scripts/gf_fm/results/traj_ode_coupled.npz
 ```
 
 ---
@@ -100,7 +99,7 @@ Visualize generated trajectories using PyBullet.
 ./isaaclab.sh -p scripts/gf_fm/run/visualize.py \
     --npz scripts/gf_fm/results/trajectories.npz \
     --traj_idx 0 \
-    --obstacles_file obstacles.yaml \
+    --obstacles_file scripts/gf_fm/config/obstacles_example.yaml \
     --pybullet \
     --playback_speed 0.5
 ```
@@ -120,9 +119,9 @@ To verify obstacle avoidance, run a comparison between baseline (no guidance) an
 ```bash
 ./isaaclab.sh -p scripts/gf_fm/run/run_inference.py \
     --checkpoint scripts/gf_fm/logs/best_model.pth \
-    --receding_horizon --fixed_start \
+    --fixed_start \
     --force_goal '[0.5, 0.5, 0.0, -1.5, 0.0, 1.5, 0.0]' \
-    --obstacles '[{"pos":[0.4,0.0,0.5],"radius":0.15}]' \
+    --obstacles_file scripts/gf_fm/config/obstacles_example.yaml \
     --no_guidance \
     --save_trajectories scripts/gf_fm/results/traj_baseline.npz
 ```
@@ -131,9 +130,9 @@ To verify obstacle avoidance, run a comparison between baseline (no guidance) an
 ```bash
 ./isaaclab.sh -p scripts/gf_fm/run/run_inference.py \
     --checkpoint scripts/gf_fm/logs/best_model.pth \
-    --receding_horizon --fixed_start \
+    --fixed_start \
     --force_goal '[0.5, 0.5, 0.0, -1.5, 0.0, 1.5, 0.0]' \
-    --obstacles '[{"pos":[0.4,0.0,0.5],"radius":0.15}]' \
+    --obstacles_file scripts/gf_fm/config/obstacles_example.yaml \
     --guidance_mode ode_coupled \
     --guidance_scale 1.5 \
     --save_trajectories scripts/gf_fm/results/traj_guidance.npz

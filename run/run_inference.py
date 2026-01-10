@@ -54,8 +54,7 @@ def parse_args():
     parser.add_argument("--save_results", type=str, default=None, help="Save results to JSON")
     parser.add_argument("--save_trajectories", type=str, default=None, help="Save trajectories to NPZ")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    # Receding horizon arguments
-    parser.add_argument("--receding_horizon", action="store_true", help="Enable receding horizon mode")
+    # Receding horizon arguments (always enabled)
     parser.add_argument("--replan_steps", type=int, default=4, help="Steps to execute before replanning")
     parser.add_argument("--goal_threshold", type=float, default=0.05, help="Goal position threshold (rad)")
     parser.add_argument("--max_steps", type=int, default=500, help="Maximum steps before timeout")
@@ -178,69 +177,6 @@ def check_joint_limits(q: np.ndarray) -> tuple:
     violation_count = np.sum((q < lower) | (q > upper))
 
     return min_margin > 0, min_margin, violation_count
-
-
-def run_inference(
-    policy,
-    guidance_field,
-    q_init: torch.Tensor,
-    q_dot_init: torch.Tensor,
-    config: dict,
-    device: str,
-) -> dict:
-    """Run policy inference from initial state.
-
-    Args:
-        policy: SecondOrderFlowPolicy
-        guidance_field: GFGuidanceField or None
-        q_init: (1, 7) initial joint positions
-        q_dot_init: (1, 7) initial joint velocities
-        config: Model config
-        device: Device
-
-    Returns:
-        result dict with trajectory
-    """
-    n_obs_steps = config.get('n_obs_steps', 2)
-    joint_dim = config.get('joint_dim', 7)
-
-    # Build observation dict
-    # Repeat initial state for n_obs_steps
-    obs_dict = {
-        'joint_pos': q_init.unsqueeze(1).repeat(1, n_obs_steps, 1),  # (1, n_obs_steps, 7)
-        'joint_vel': q_dot_init.unsqueeze(1).repeat(1, n_obs_steps, 1),  # (1, n_obs_steps, 7)
-    }
-
-    # Run policy
-    with torch.no_grad():
-        result = policy.predict_action({'obs': obs_dict})
-
-    # Extract action (velocity field)
-    action_pred = result['action_pred']  # (1, horizon, 14)
-
-    # Split into q_dot and q_ddot
-    q_dot_pred = action_pred[..., :joint_dim].cpu().numpy()  # (1, H, 7)
-    q_ddot_pred = action_pred[..., joint_dim:].cpu().numpy()  # (1, H, 7)
-
-    # Integrate trajectory
-    dt = config.get('interpolation_dt', 0.02)
-    q_init_np = q_init.cpu().numpy()  # (1, 7)
-
-    H = q_dot_pred.shape[1]
-    q_traj = np.zeros((1, H + 1, joint_dim))
-    q_traj[:, 0, :] = q_init_np
-
-    # Simple Euler integration
-    for t in range(H):
-        q_traj[:, t + 1, :] = q_traj[:, t, :] + dt * q_dot_pred[:, t, :]
-
-    return {
-        'q_init': q_init_np.squeeze(0),
-        'q_trajectory': q_traj.squeeze(0),  # (H+1, 7)
-        'q_dot_pred': q_dot_pred.squeeze(0),  # (H, 7)
-        'q_ddot_pred': q_ddot_pred.squeeze(0),  # (H, 7)
-        'dt': dt,
-    }
 
 
 def run_receding_horizon_inference(
@@ -368,10 +304,7 @@ def main():
     torch.manual_seed(args.seed)
 
     print(f"\n{'='*60}")
-    if args.receding_horizon:
-        print("GF-FM Receding Horizon Inference")
-    else:
-        print("GF-FM Standalone Inference")
+    print("GF-FM Receding Horizon Inference")
     print(f"{'='*60}")
     print(f"  Checkpoint: {args.checkpoint}")
     print(f"  Rollouts: {args.num_rollouts}")
@@ -380,16 +313,12 @@ def main():
     else:
         print(f"  Guidance: scale={args.guidance_scale}, mode={args.guidance_mode}")
     print(f"  Device: {args.device}")
-    if args.receding_horizon:
-        print(f"  Mode: RECEDING HORIZON")
-        print(f"  Replan steps: {args.replan_steps}")
-        print(f"  Goal threshold: {args.goal_threshold} rad")
-        print(f"  Max steps: {args.max_steps}")
-        print(f"  Fixed start: {args.fixed_start}")
-        if args.fixed_start:
-            print(f"  Start config: {FIXED_START_Q.tolist()}")
-    else:
-        print(f"  Mode: SINGLE-SHOT")
+    print(f"  Replan steps: {args.replan_steps}")
+    print(f"  Goal threshold: {args.goal_threshold} rad")
+    print(f"  Max steps: {args.max_steps}")
+    print(f"  Fixed start: {args.fixed_start}")
+    if args.fixed_start:
+        print(f"  Start config: {FIXED_START_Q.tolist()}")
     print(f"{'='*60}\n")
 
     # Load policy
@@ -482,37 +411,24 @@ def main():
         else:
             q_init, q_dot_init = sample_random_state(rng, args.device)
 
-        if args.receding_horizon:
-            # Sample random goal state
-            q_goal = sample_goal_state(rng, args.device, forced_goal=forced_goal)
+        # Sample random goal state
+        q_goal = sample_goal_state(rng, args.device, forced_goal=forced_goal)
 
-            # Run receding horizon inference
-            result = run_receding_horizon_inference(
-                policy, guidance_field,
-                q_init, q_dot_init, q_goal,
-                config, args.device,
-                replan_steps=args.replan_steps,
-                goal_threshold=args.goal_threshold,
-                max_steps=args.max_steps,
-            )
+        # Run receding horizon inference
+        result = run_receding_horizon_inference(
+            policy, guidance_field,
+            q_init, q_dot_init, q_goal,
+            config, args.device,
+            replan_steps=args.replan_steps,
+            goal_threshold=args.goal_threshold,
+            max_steps=args.max_steps,
+        )
 
-            # Track receding horizon stats
-            if result['reached_goal']:
-                goal_reached_count += 1
-            total_steps_list.append(result['total_steps'])
-            final_errors.append(result['final_error'])
-
-        else:
-            # Single-shot inference
-            result = run_inference(
-                policy, guidance_field, q_init, q_dot_init, config, args.device
-            )
-
-            # Check joint limits
-            valid, min_margin, violations = check_joint_limits(result['q_trajectory'])
-            result['valid'] = valid
-            result['min_margin'] = float(min_margin)
-            result['violations'] = int(violations)
+        # Track receding horizon stats
+        if result['reached_goal']:
+            goal_reached_count += 1
+        total_steps_list.append(result['total_steps'])
+        final_errors.append(result['final_error'])
 
         if result['valid']:
             valid_count += 1
@@ -526,21 +442,17 @@ def main():
     print("Results Summary")
     print(f"{'='*60}")
 
-    if args.receding_horizon:
-        avg_steps = np.mean(total_steps_list)
-        avg_error = np.mean(final_errors)
-        dt = config.get('interpolation_dt', 0.02)
-        avg_time = avg_steps * dt
+    avg_steps = np.mean(total_steps_list)
+    avg_error = np.mean(final_errors)
+    dt = config.get('interpolation_dt', 0.02)
+    avg_time = avg_steps * dt
 
-        print(f"  Goal reached: {goal_reached_count}/{args.num_rollouts} ({100*goal_reached_count/args.num_rollouts:.1f}%)")
-        print(f"  Avg steps to goal: {avg_steps:.1f}")
-        print(f"  Avg trajectory time: {avg_time:.2f}s")
-        print(f"  Avg final error: {avg_error:.4f} rad")
-        print(f"  Valid trajectories: {valid_count}/{args.num_rollouts} ({100*valid_count/args.num_rollouts:.1f}%)")
-        print(f"  Total limit violations: {total_violations}")
-    else:
-        print(f"  Valid trajectories: {valid_count}/{args.num_rollouts} ({100*valid_count/args.num_rollouts:.1f}%)")
-        print(f"  Total limit violations: {total_violations}")
+    print(f"  Goal reached: {goal_reached_count}/{args.num_rollouts} ({100*goal_reached_count/args.num_rollouts:.1f}%)")
+    print(f"  Avg steps to goal: {avg_steps:.1f}")
+    print(f"  Avg trajectory time: {avg_time:.2f}s")
+    print(f"  Avg final error: {avg_error:.4f} rad")
+    print(f"  Valid trajectories: {valid_count}/{args.num_rollouts} ({100*valid_count/args.num_rollouts:.1f}%)")
+    print(f"  Total limit violations: {total_violations}")
 
     print(f"  GF guidance: {'ENABLED' if not args.no_guidance else 'DISABLED'}")
     print(f"{'='*60}\n")
@@ -558,19 +470,18 @@ def main():
             'n_substeps': args.n_substeps,
             'lambda_schedule': args.lambda_schedule,
             'checkpoint': args.checkpoint,
-            'receding_horizon': args.receding_horizon,
+            'receding_horizon': True,
         }
 
-        if args.receding_horizon:
-            summary.update({
-                'replan_steps': args.replan_steps,
-                'goal_threshold': args.goal_threshold,
-                'max_steps': args.max_steps,
-                'goal_reached_count': int(goal_reached_count),
-                'goal_reached_rate': float(goal_reached_count / args.num_rollouts),
-                'avg_steps': float(avg_steps),
-                'avg_final_error': float(avg_error),
-            })
+        summary.update({
+            'replan_steps': args.replan_steps,
+            'goal_threshold': args.goal_threshold,
+            'max_steps': args.max_steps,
+            'goal_reached_count': int(goal_reached_count),
+            'goal_reached_rate': float(goal_reached_count / args.num_rollouts),
+            'avg_steps': float(avg_steps),
+            'avg_final_error': float(avg_error),
+        })
 
         with open(args.save_results, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -579,28 +490,20 @@ def main():
     # Save trajectories
     if args.save_trajectories:
         # Handle variable length trajectories for receding horizon
-        if args.receding_horizon:
-            # Save as object array for variable lengths
-            save_dict = {
-                'joint_limits_lower': FRANKA_JOINT_LIMITS["lower"],
-                'joint_limits_upper': FRANKA_JOINT_LIMITS["upper"],
-                'num_trajectories': len(all_trajectories),
-            }
-            # Save each trajectory separately
-            for idx, traj in enumerate(all_trajectories):
-                save_dict[f'traj_{idx}'] = traj
-                save_dict[f'goal_{idx}'] = results[idx]['q_goal']
-                save_dict[f'reached_{idx}'] = results[idx]['reached_goal']
-                save_dict[f'steps_{idx}'] = results[idx]['total_steps']
+        # Save as object array for variable lengths
+        save_dict = {
+            'joint_limits_lower': FRANKA_JOINT_LIMITS["lower"],
+            'joint_limits_upper': FRANKA_JOINT_LIMITS["upper"],
+            'num_trajectories': len(all_trajectories),
+        }
+        # Save each trajectory separately
+        for idx, traj in enumerate(all_trajectories):
+            save_dict[f'traj_{idx}'] = traj
+            save_dict[f'goal_{idx}'] = results[idx]['q_goal']
+            save_dict[f'reached_{idx}'] = results[idx]['reached_goal']
+            save_dict[f'steps_{idx}'] = results[idx]['total_steps']
 
-            np.savez(args.save_trajectories, **save_dict)
-        else:
-            np.savez(
-                args.save_trajectories,
-                trajectories=np.stack(all_trajectories),
-                joint_limits_lower=FRANKA_JOINT_LIMITS["lower"],
-                joint_limits_upper=FRANKA_JOINT_LIMITS["upper"],
-            )
+        np.savez(args.save_trajectories, **save_dict)
         print(f"[Save] Trajectories: {args.save_trajectories}")
 
 

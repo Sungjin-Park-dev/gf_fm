@@ -139,15 +139,15 @@ def collision_response(
     # Check the collision matrix. If value == 1, then calculate distance and collision response
     if sphere_collision_matrix[point_index, second_point_index] == 1:
         # Create a vector pointing from the current body point to another body point
-        point1_to_point2 = robot_body_points[batch_index, second_point_index] -
+        point1_to_point2 = robot_body_points[batch_index, second_point_index] -\
                            robot_body_points[batch_index, point_index]
         # Normalize this vector
         n = wp.normalize(point1_to_point2)
 
         # Calculate the distance between these two body spheres by calculating the distance between
         # the two body points and subtracting the radii of the spheres
-        d_signed = wp.length(point1_to_point2) -
-                   sphere_radius[batch_index, point_index] -
+        d_signed = wp.length(point1_to_point2) -\
+                   sphere_radius[batch_index, point_index] -\
                    sphere_radius[batch_index, second_point_index]
             
         # Clamp d so that it is postively bounded
@@ -235,9 +235,9 @@ def eval_collision_response_func(point_positions, point_velocities, allocated_da
     allocated_data['base_acceleration'] = wp.torch.from_torch(base_acceleration, dtype=wp.vec3)
 
     # Allocate or re-allocate sphere_mesh_checked data if needed
-    if allocated_data['sphere_mesh_checked'] is None or \
+    if allocated_data['sphere_mesh_checked'] is None or\
        allocated_data['sphere_mesh_checked'].shape[2] != num_meshes:
-           allocated_data['sphere_mesh_checked'] =
+           allocated_data['sphere_mesh_checked'] =\
                wp.zeros(shape=(batch_size, num_points, num_meshes),
                         dtype=wp.int32,
                         device=allocated_data['device'])
@@ -352,7 +352,7 @@ class BaseFabricRepulsion():
         self._in_collision = None
         
         # Dictionary of various signals required for repulsion calculations.
-        self.allocated_data =
+        self.allocated_data =\
             { 'batch_size': batch_size,
               'num_points': self._num_points,
               'robot_body_points': wp.zeros(shape=(batch_size, self._num_points), dtype=wp.vec3, device=device),
@@ -393,7 +393,7 @@ class BaseFabricRepulsion():
         self.allocated_data['object_mesh'] = object_mesh_ids
         self.allocated_data['object_indicator'] = object_indicator
         # Launch the collision response kernel
-        (signed_distance, base_acceleration, metric) =
+        (signed_distance, base_acceleration, metric) =\
             CollisionResponse.apply(x.reshape(batch_size, num_points, 3),
                                     xd.reshape(batch_size, num_points, 3),
                                     self.allocated_data)
@@ -513,18 +513,18 @@ class BodySphereRepulsion(BaseFabricTerm):
             if self.is_forcing_policy:
                 # Provide additional scaling for forcing fabric term on metric
                 if self.graph_capturable:
-                    self.metric.copy_((self.params['forcing_metric_scalar'] / self.expanded_dist**2) *
+                    self.metric.copy_((self.params['forcing_metric_scalar'] / self.expanded_dist**2) *\
                                   features.base_metric)
                 else:
-                    self.metric = (self.params['forcing_metric_scalar'] / self.expanded_dist**2) *
+                    self.metric = (self.params['forcing_metric_scalar'] / self.expanded_dist**2) *\
                                    features.base_metric
             else:
                 # Provide additional scaling for geometric fabric term on metric
                 if self.graph_capturable:
-                    self.metric.copy_((self.params['geom_metric_scalar'] / self.expanded_dist**2) *
+                    self.metric.copy_((self.params['geom_metric_scalar'] / self.expanded_dist**2) *\
                                   features.base_metric)
                 else:
-                    self.metric = (self.params['geom_metric_scalar'] / self.expanded_dist**2) *
+                    self.metric = (self.params['geom_metric_scalar'] / self.expanded_dist**2) *\
                                   features.base_metric
 
     def force_eval(self, x, xd, features):
@@ -548,12 +548,14 @@ class BodySphereRepulsion(BaseFabricTerm):
 
             if self.is_forcing_policy:
                 # Scale the acceleration by some positive value and add damping
-                xdd = -self.params['constant_accel'] * accel_dir -
+                # REMOVED negative sign to align with correct repulsion direction
+                xdd = self.params['constant_accel'] * accel_dir -\
                       self.params['damping_gain'] * xd
             else:
                 # Scale the acceleration by some positive value and the inner product of
                 # velocity to create a geometry
-                xdd_not_hd2 = -self.params['constant_accel_geom'] * accel_dir
+                # REMOVED negative sign to align with correct repulsion direction
+                xdd_not_hd2 = self.params['constant_accel_geom'] * accel_dir
                 vel_squared = torch.sum(xd*xd, dim=1).unsqueeze(1)
                 xdd = vel_squared * xdd_not_hd2
         
